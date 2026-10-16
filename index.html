@@ -21,6 +21,7 @@
   .cell .v { font-size:24px; font-weight:700; font-variant-numeric:tabular-nums; margin-top:2px; }
   .cell .u { font-size:11px; color:var(--dim); font-weight:400; }
   #st-proto .v { color:var(--acc); font-size:15px; }
+  #st-src .v { color:var(--warn); font-size:13px; }
   #st-fault .v { color:var(--bad); }
   .res-wrap { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px; margin:10px 0; }
   .res-row { display:flex; align-items:center; gap:12px; }
@@ -31,8 +32,8 @@
   .chk input { width:18px; height:18px; accent-color:var(--acc); }
   .st3 { display:flex; gap:8px; margin:4px 0 10px; }
   .st3 button { flex:1; padding:12px 0; font-size:15px; border-radius:10px; border:1px solid var(--line); background:#21262d; color:var(--fg); }
-  .note { font-size:11px; color:var(--dim); margin:-4px 0 8px; }
-  #log { background:#010409; border:1px solid var(--line); border-radius:12px; padding:8px 10px; height:200px; overflow-y:auto; font:11px/1.55 "SF Mono",Consolas,monospace; color:#7d8590; white-space:pre-wrap; word-break:break-all; }
+  .note { font-size:11px; color:var(--dim); margin:-4px 0 8px; line-height:1.55; }
+  #log { background:#010409; border:1px solid var(--line); border-radius:12px; padding:8px 10px; height:210px; overflow-y:auto; font:11px/1.55 "SF Mono",Consolas,monospace; color:#7d8590; white-space:pre-wrap; word-break:break-all; }
   .hdr-row { display:flex; justify-content:space-between; align-items:center; }
   #connState { font-size:12px; color:var(--warn); }
   .toolbar { display:flex; gap:8px; margin:6px 0; }
@@ -41,7 +42,7 @@
 </head>
 <body>
 <div class="hdr-row">
-  <h1>莫比椭圆机控制台 <span style="font-size:11px;color:#8b949e">v1.2</span></h1><span id="connState">未连接</span>
+  <h1>莫比椭圆机控制台 <span style="font-size:11px;color:#8b949e">v1.3</span></h1><span id="connState">未连接</span>
 </div>
 <div class="sub">Web 版 · 三协议自适应 (v1/v2/环通) · 需 Bluefy 浏览器打开</div>
 
@@ -59,7 +60,8 @@
   <div class="cell"><div class="k">电量</div><div class="v" id="v-batt">—<span class="u"> %</span></div></div>
   <div class="cell"><div class="k">距离</div><div class="v" id="v-dist">—<span class="u"> km</span></div></div>
   <div class="cell"><div class="k">卡路里</div><div class="v" id="v-kcal">—<span class="u"> kcal</span></div></div>
-  <div class="cell"><div class="k">时长</div><div class="v" id="v-time">—<span class="u"> s</span></div></div>
+  <div class="cell"><div class="k">时长</div><div class="v" id="v-time">—<span class="u"> 分:秒</span></div></div>
+  <div class="cell" id="st-src"><div class="k">数据源</div><div class="v" id="v-src">—</div></div>
   <div class="cell" id="st-fault"><div class="k">故障码</div><div class="v" id="v-fault">—</div></div>
 </div>
 
@@ -70,16 +72,20 @@
     <div id="resVal">1</div>
     <button class="res-btn" id="resPlus">＋</button>
   </div>
-  <label class="chk"><input type="checkbox" id="chkHalve" checked> 磁阻机型（踏频÷2，v1 数据异常时切换试试）</label>
+  <label class="chk"><input type="checkbox" id="chkHalve"> 踏频修正 ÷2（速度/踏频偏高时勾选）</label>
 </div>
 
 <div class="st3">
   <button data-st="1">开始</button><button data-st="2">暂停</button><button data-st="0">停止</button>
 </div>
-<div class="note">启停仅 v2 协议实验性可用；v1 设备踩动即出数据，无需启停</div>
+<div class="note">启停仅 v2 协议实验性可用；v1 设备踩动即出数据，无需启停。</div>
 
 <div class="toolbar">
-  <button id="btnDump">重读 GATT 结构</button>
+  <button id="btnDump">重读 GATT</button>
+  <button id="btnDiag">复制诊断摘要</button>
+  <button id="btnReset">重置累计</button>
+</div>
+<div class="toolbar">
   <button id="btnCopy">复制日志</button>
   <button id="btnClear">清空日志</button>
 </div>
@@ -90,6 +96,7 @@
 var POWER_C = [39.94501450202982, -67.52588516, -39.15593086,
                27.55487038, 38.79652081, -0.30231185];
 var UNLOCK_FRAME = new Uint8Array([0x11, 0x82, 0x07]);
+var SPEED_DIV_RPM = 10.72;   /* 莫比 App: speed = rpm/2.68, 椭圆机再 /4 */
 
 function calcPower(rpm, resistance, resMax) {
   if (!resMax || resMax <= 0) resMax = 24;
@@ -98,6 +105,12 @@ function calcPower(rpm, resistance, resMax) {
   var c = POWER_C;
   var p = c[5]*e2*e2 + c[4]*e1*e2 + c[3]*e1*e1 + c[2]*e2 + c[1]*e1 + c[0];
   return Math.max(0, p);
+}
+function derivedSpeed(rpm) { return (rpm || 0) / SPEED_DIV_RPM; }
+function derivedPower(rpm, res, resMax, subtype) {
+  var p = calcPower(rpm || 0, res || 1, resMax || 24);
+  if (subtype === 0x11) p *= 1.5;          /* DeviceToolsKt.elliptical0B11 */
+  return p;
 }
 function buildV01ResFrame(lastAb, res) {
   if (!lastAb || lastAb.length <= 6) throw new Error("尚未收到设备AB帧,无法构造阻力指令");
@@ -142,18 +155,23 @@ function parseV01(d, st, ev) {
     if (d.length > 3 && d[1] === 1) st.foldState = d[3];
   }
 }
+/* v0x02 8813 全量帧（与 App BluetoothLeService$didConnectBleVer0x02Device$15 逐字节对齐）
+   [0]=速度/10 [1]=坡度 [2]=踏频 [3..4]=BE时长s [5..6]=BE距离m [7..8]=BE卡路里/10 [9..10]=BE功率W(len==11) */
 function parseV02_8813(d, st) {
-  if (d.length <= 8) return;
-  st.speed = d[0] / 10.0;
-  st.incline = d[1];
-  st.cadence = d[2];
-  st.durationS = (d[3]<<8)|d[4];
-  st.distanceM = (d[5]<<8)|d[6];
-  st.kcal = ((d[7]<<8)|d[8]) / 10.0;
-  if (d.length === 11) st.power = (d[9]<<8)|d[10];
+  if (!d || d.length <= 8) return false;
+  st.devSpeed   = d[0] / 10.0;
+  st.devIncline = d[1];
+  st.devCadence = d[2];
+  st.devDurS    = (d[3]<<8)|d[4];
+  st.devDistM   = (d[5]<<8)|d[6];
+  st.devKcal    = ((d[7]<<8)|d[8]) / 10.0;
+  if (d.length === 11) st.devPower = (d[9]<<8)|d[10];
+  st.devT = Date.now();
+  st.src8813 = true;
+  return true;
 }
 function parseV02_8811(d, st, magnets) {
-  if (d.length < 2) return;
+  if (!d || d.length < 2) return;
   var period = (d[0]<<8)|d[1];
   st.periodMs = period;
   if (period === 0) return;
@@ -176,6 +194,12 @@ function parseHr(d) {
   if (isNaN(v)) return null;
   if (v > 300) v %= 300;
   return (v >= 30 && v <= 300) ? v : null;
+}
+function fmtTime(s) {
+  s = Math.max(0, Math.floor(s || 0));
+  var m = Math.floor(s / 60), sec = s % 60, h = Math.floor(m / 60); m = m % 60;
+  function p(n) { return (n < 10 ? "0" : "") + n; }
+  return h > 0 ? (h + ":" + p(m) + ":" + p(sec)) : (m + ":" + p(sec));
 }
 /* ====== UUID 规范化（iOS/Bluefy 可能返回短格式 UUID） ====== */
 function normUuid(u) {
@@ -216,21 +240,37 @@ function runSelfTests(log) {
   var fh = buildHtResFrame(9);
   ck("环通帧9", Array.from(fh).join(",") === "32,193,9,0,234");
   var st2 = {};
-  parseV02_8813(new Uint8Array([64,0,80, 2,88, 7,208, 0,153, 0,155]), st2);
-  ck("8813速度6.4", st2.speed === 6.4, String(st2.speed));
-  ck("8813时长600", st2.durationS === 600);
-  ck("8813距离2000", st2.distanceM === 2000);
-  ck("8813热量15.3", st2.kcal === 15.3);
-  ck("8813功率155", st2.power === 155);
+  var ok13 = parseV02_8813(new Uint8Array([64,0,80, 2,88, 7,208, 0,153, 0,155]), st2);
+  ck("8813接受(len=11)", ok13 === true);
+  ck("8813速度6.4", st2.devSpeed === 6.4, String(st2.devSpeed));
+  ck("8813踏频80", st2.devCadence === 80);
+  ck("8813时长600", st2.devDurS === 600);
+  ck("8813距离2000", st2.devDistM === 2000);
+  ck("8813热量15.3", st2.devKcal === 15.3);
+  ck("8813功率155", st2.devPower === 155);
+  ck("8813置位 src8813", st2.src8813 === true);
+  var st2b = {};
+  ck("8813拒绝(len=8)", parseV02_8813(new Uint8Array([1,2,3,4,5,6,7,8]), st2b) === false);
+  var st2c = {};
+  parseV02_8813(new Uint8Array([1,2,3,4,5,6,7,8,9]), st2c);
+  ck("8813 len=9 无功率字段", st2c.devPower === undefined && st2c.devDurS === ((4<<8)|5));
   var st3 = {};
   parseV02_8811(new Uint8Array([0x03,0xE8]), st3, 1);
   ck("8811→60rpm", Math.abs((st3.rpm||0)-60) < 0.01, String(st3.rpm));
+  var st3b = {};
+  parseV02_8811(new Uint8Array([0x03,0xE8]), st3b, 2);
+  ck("8811磁钢2→30rpm", Math.abs((st3b.rpm||0)-30) < 0.01, String(st3b.rpm));
   var st4 = {};
   parseHtFff1(new Uint8Array([0,1,0x00,0x30,0,0,0,0,0,0,0,0]), st4);
   ck("环通BCD→30rpm", st4.rpm === 30, String(st4.rpm));
   ck("心率0048→72", parseHr(new Uint8Array([0x00,0x48])) === 72);
   var p = calcPower(60, 12, 24);
   ck("功率公式", p > 0 && p < 500, p.toFixed(1) + "W");
+  ck("推算速度 60rpm=5.6km/h", Math.abs(derivedSpeed(60) - 5.6) < 0.01, String(derivedSpeed(60)));
+  ck("推算功率>0", derivedPower(60, 12, 24) > 0);
+  ck("时长 0s", fmtTime(0) === "0:00", fmtTime(0));
+  ck("时长 65s", fmtTime(65) === "1:05", fmtTime(65));
+  ck("时长 3725s", fmtTime(3725) === "1:02:05", fmtTime(3725));
   ck("UUID短→完整", normUuid("ffe0") === "0000ffe0-0000-1000-8000-00805f9b34fb", normUuid("ffe0"));
   ck("UUID s4(完整)", s4("0000FFE0-0000-1000-8000-00805F9B34FB") === "ffe0");
   ck("UUID s4(短)", s4("ffe0") === "ffe0");
@@ -239,9 +279,9 @@ function runSelfTests(log) {
   return fail === 0;
 }
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { calcPower, buildV01ResFrame, buildV02ResFrame, buildV02StateFrame,
-    buildHtResFrame, parseV01, parseV02_8813, parseV02_8811, parseHtFff1, parseHr,
-    normUuid, s4, runSelfTests, UNLOCK_FRAME };
+  module.exports = { calcPower, derivedSpeed, derivedPower, buildV01ResFrame, buildV02ResFrame,
+    buildV02StateFrame, buildHtResFrame, parseV01, parseV02_8813, parseV02_8811, parseHtFff1,
+    parseHr, fmtTime, normUuid, s4, runSelfTests, UNLOCK_FRAME, SPEED_DIV_RPM };
 }
 </script>
 
@@ -255,7 +295,7 @@ function log(t) {
   var time = new Date().toTimeString().slice(0, 8);
   logBox.textContent += "[" + time + "] " + t + "\n";
   var lines = logBox.textContent.split("\n");
-  if (lines.length > 400) logBox.textContent = lines.slice(-400).join("\n");
+  if (lines.length > 500) logBox.textContent = lines.slice(-500).join("\n");
   logBox.scrollTop = logBox.scrollHeight;
 }
 function hexs(u8) { return Array.from(u8).map(function (b) { return b.toString(16).toUpperCase().padStart(2, "0"); }).join(" "); }
@@ -264,11 +304,13 @@ function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
 var S = {
   device: null, server: null, protocol: "",
-  st: { halveRpm: true },
+  st: { halveRpm: false },
   svcList: [], svcMap: {},
   magnets: 1, resMax: 24, interval: null,
   htTimer: null, htResistance: 1, connected: false,
-  writeCharV01: null
+  writeCharV01: null, integTimer: null, subCount: 0,
+  stats: {},       /* tag -> {n, last} */
+  thr: {}          /* 日志节流 */
 };
 
 var OPTIONAL = [
@@ -281,6 +323,16 @@ var OPTIONAL = [
   "00001812-0000-1000-8000-00805f9b34fb", "00001816-0000-1000-8000-00805f9b34fb",
   "0000181c-0000-1000-8000-00805f9b34fb", "00001822-0000-1000-8000-00805f9b34fb"
 ];
+
+function note(tag, u8) {
+  var s = S.stats[tag] || (S.stats[tag] = { n: 0, last: "" });
+  s.n++; s.last = hexs(u8);
+}
+function logThr(key, ms, text) {
+  var now = Date.now();
+  if (S.thr[key] && now - S.thr[key] < ms) return;
+  S.thr[key] = now; log(text);
+}
 
 /* ---------- 连接 ---------- */
 async function connect() {
@@ -336,10 +388,13 @@ async function connect() {
     setV("v-proto", proto);
     log("判定协议: " + proto + "  [8800=" + has8800 + " ffe0=" + hasFfe0 + " ffc0=" + hasFfc0 + " fff0=" + hasFff0 + " 180d=" + hasHR + "]");
 
+    S.st._lastT = null;
     if (proto === "v0x02") await setupV02();
     else if (proto === "环通") await setupHt();
     else if (proto === "心率带") await setupHrOnly();
     else await setupV01();
+    startIntegrator();
+    render();
     $("btnConn").textContent = "已连接 · 点击断开";
   } catch (e) {
     log("连接流程异常: " + (e && e.message ? e.message : e));
@@ -349,11 +404,12 @@ async function connect() {
   $("btnConn").disabled = false;
 }
 async function disconnect() {
+  stopIntegrator();
   if (S.htTimer) { clearInterval(S.htTimer); S.htTimer = null; }
   try { if (S.server && S.server.connected) await S.server.disconnect(); } catch (e) {}
 }
 function onDisconnected() {
-  S.connected = false; setConnState("已断开");
+  S.connected = false; setConnState("已断开"); stopIntegrator();
   setV("v-proto", "—"); log("设备已断开");
   $("btnConn").textContent = "① 连接椭圆机";
   if (S.htTimer) { clearInterval(S.htTimer); S.htTimer = null; }
@@ -405,7 +461,7 @@ async function cRead(shortSvc, shortChar) {
   try {
     var dv = await c.readValue();
     var u8 = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
-    log("R " + shortChar + " -> " + hexs(u8));
+    log("R " + shortChar + " -> " + (u8.length ? hexs(u8) : "(空)"));
     return u8;
   } catch (e) { log("R " + shortChar + " 失败: " + (e.message || e)); return null; }
 }
@@ -447,34 +503,75 @@ async function tryNotify(c, handler, label) {
 
 /* ---------- v0x02 ---------- */
 async function setupV02() {
-  var d = await cRead("8800", "8801"); if (d && d.length) { S.interval = d[0]; log("interval=" + d[0]); }
-  d = await cRead("8800", "8805"); if (d && d.length && d[0]) S.magnets = d[0];
+  var d = await cRead("8800", "8801");
+  if (d && d.length) {
+    S.interval = d[0];
+    log("interval=" + d[0] + (d[0] === 1
+      ? " → 设备只上报 8811/8812(踏频/阻力), 不发 8813 全量帧 → 速度/功率/距离/热量/时长由本页按莫比算法推算"
+      : " → 全量模式 (8813 应可用)"));
+  } else log("警告: 8801 上报模式读取失败, 无法判断设备是否发送全量帧 8813");
+  d = await cRead("8800", "8805"); if (d && d.length && d[0]) { S.magnets = d[0]; log("磁钢数=" + d[0]); }
+  d = await cRead("8800", "8802"); if (d && d.length) log("8802 机型码=" + hexs(d));
   d = await cRead("8800", "8806");
   if (d && d.length > 2 && d[2] > 0) { S.resMax = d[2]; $("resSlider").max = d[2]; log("阻力上限=" + d[2]); }
   d = await cRead("180f", "2a19"); if (d && d.length) setV("v-batt", d[0]);
   var uc = await findChar("8800", "88ff");
   if (uc) { if (await cWriteChar(uc, UNLOCK_FRAME, "88ff")) S.st.unlocked = true; }
   else log("未找到 88ff 解锁特征");
-  var subs = ["880e", "8811", "8812", "8813"], n = 0;
+
+  var subs = ["880e", "8811", "8812", "8813"], n = 0, skip = [];
   for (var i = 0; i < subs.length; i++) {
     var c = await findChar("8800", subs[i]);
-    if (c && await tryNotify(c, onV02Data, subs[i])) n++;
+    if (!c) { log("未找到特征 8800|" + subs[i]); continue; }
+    if (await tryNotify(c, onV02Data, subs[i])) n++; else skip.push(subs[i]);
+  }
+  S.subCount = n;
+  /* 兜底: 8800 服务下其余可通知特征全部订阅（可发现厂商私有帧） */
+  var extra = [];
+  var sv8800 = S.svcMap["8800"];
+  if (sv8800) {
+    var cs = [];
+    try { cs = await sv8800.getCharacteristics(); } catch (e) {}
+    for (var j = 0; j < cs.length; j++) {
+      var id = s4(cs[j].uuid), p = cs[j].properties || {};
+      if (subs.indexOf(id) >= 0) continue;
+      if (!(p.notify || p.indicate)) continue;
+      if (await tryNotify(cs[j], onV02Data, "8800:" + id)) extra.push(id);
+    }
   }
   var hc = await findChar("180d", "2a37");
   if (hc) await tryNotify(hc, onHr, "2a37");
-  log("v0x02 装配完成, 订阅 " + n + "/4");
+  else log("无 180d 心率服务 (机身无心率传感器; 心率需握把心率/心率带)");
+  log("v0x02 装配完成, 标准订阅 " + n + "/4" + (skip.length ? " (失败: " + skip.join(",") + ")" : "") +
+      (extra.length ? " · 额外订阅 " + extra.join(",") : ""));
 }
 function onV02Data(u8, tag) {
-  log("N " + tag + " <- " + hexs(u8));
+  note(tag, u8);
   var st = S.st;
   if (tag === "880e") {
+    logThr("880e", 5000, "N 880e <- " + hexs(u8));
     if (u8.length) setV("v-state", ({0:"停止",1:"运行",2:"暂停"})[u8[0]] || u8[0]);
-  } else if (tag === "8811") { parseV02_8811(u8, st, S.magnets); tick(); }
-  else if (tag === "8812") {
+  } else if (tag === "8811") {
+    logThr("8811", 3000, "N 8811 <- " + hexs(u8));
+    parseV02_8811(u8, st, S.magnets);
+    render();
+  } else if (tag === "8812") {
+    logThr("8812", 3000, "N 8812 <- " + hexs(u8));
     if (u8.length && u8[0] >= 1 && u8[0] <= S.resMax) { st.resistance = u8[0]; setV("v-res", u8[0]); syncSlider(u8[0]); }
-  } else if (tag === "8813") { parseV02_8813(u8, st); tick(); }
+  } else if (tag === "8813") {
+    log("N 8813 <- " + hexs(u8) + " (len=" + u8.length + ")");
+    if (parseV02_8813(u8, st)) log("  → 全量帧已解析: 速度/时长/距离/热量/功率 改用设备值");
+    else log("  → 8813 长度 " + u8.length + " ≤8, 按协议忽略");
+    render();
+  } else {
+    logThr(tag, 3000, "N " + tag + " <- " + hexs(u8));
+  }
 }
-function onHr(u8) { var hr = parseHr(u8); if (hr) { S.st.hr = hr; setV("v-hr", hr); } }
+function onHr(u8, tag) {
+  note(tag || "2a37", u8);
+  var hr = parseHr(u8);
+  if (hr) { S.st.hr = hr; setV("v-hr", hr); }
+}
 
 /* ---------- v0x01 ---------- */
 /* 阻力写特征选择: ffe3 > ffe2 > ffed > 运动服务(ffe0/ffc0/fff0)下的可写 > 任意可写 */
@@ -526,6 +623,7 @@ async function setupV01() {
       }
     }
   }
+  S.subCount = n;
   S.writeCharV01 = await pickV01WriteChar();
   log(S.writeCharV01
     ? ("阻力写特征: " + S.writeCharV01.uuid + " [" + ((S.writeCharV01.properties.write ? "W" : "") + (S.writeCharV01.properties.writeWithoutResponse ? "Wnr" : "")) + "]")
@@ -533,20 +631,23 @@ async function setupV01() {
   log(n ? ("v0x01 装配完成, 已订阅: " + found.join(", ")) : "警告: 没有任何可订阅特征");
 }
 function onV01Data(u8, tag) {
-  log("N " + tag + " <- " + hexs(u8));
+  note(tag, u8);
+  logThr(tag, 2000, "N " + tag + " <- " + hexs(u8));
   var ev = [];
   parseV01(u8, S.st, ev);
   if (S.st.resMax && S.st.resMax !== parseInt($("resSlider").max, 10)) $("resSlider").max = S.st.resMax;
   if (ev.indexOf("fault") >= 0) setV("v-fault", S.st.fault);
-  if (ev.indexOf("tick") >= 0 || ev.indexOf("cmd") >= 0) tick();
+  render();
 }
 
 /* ---------- 环通 ---------- */
 async function setupHt() {
   var rc = await findChar("fff0", "fff1");
-  if (rc) await tryNotify(rc, function (u8) {
-    log("N fff1 <- " + hexs(u8));
-    parseHtFff1(u8, S.st); tick();
+  if (rc) await tryNotify(rc, function (u8, tag) {
+    note(tag, u8);
+    logThr("fff1", 3000, "N fff1 <- " + hexs(u8));
+    parseHtFff1(u8, S.st);
+    render();
   }, "fff1");
   else log("未找到 fff1 通知特征");
   S.htTimer = setInterval(async function () {
@@ -565,41 +666,91 @@ async function setupHrOnly() {
 }
 
 /* ---------- 指标推算 / 面板刷新 ---------- */
-function tick() {
+function useDevice() { return S.st.src8813 === true; }
+function simSpeed() { return derivedSpeed(S.st.rpm || 0); }
+function simPower() {
+  return derivedPower(S.st.rpm || 0, S.st.resistance || 1, S.st.resMax || 24, S.st.subtypeDetail);
+}
+
+function render() {
   var st = S.st;
   if (st.rpm !== undefined) setV("v-rpm", st.rpm.toFixed(1));
+  else if (useDevice() && st.devCadence !== undefined) setV("v-rpm", st.devCadence);
+
+  var speed = (useDevice() && st.devSpeed !== undefined) ? st.devSpeed
+            : (st.rpm !== undefined ? simSpeed() : undefined);
+  if (speed !== undefined) setV("v-speed", speed.toFixed(1));
+
+  var power = (useDevice() && st.devPower !== undefined) ? st.devPower
+            : (st.rpm !== undefined ? simPower() : undefined);
+  if (power !== undefined) setV("v-power", power.toFixed(1));
+
   if (st.resistance !== undefined) setV("v-res", st.resistance);
   if (st.hr !== undefined) setV("v-hr", st.hr);
   if (st.battery !== undefined) setV("v-batt", st.battery);
-  if (S.protocol === "v0x01" || S.protocol === "环通") {
-    if (st.rpm !== undefined) {
-      var speed = st.rpm / 10.72;
-      setV("v-speed", speed.toFixed(1));
-      var p = calcPower(st.rpm, st.resistance || 1, st.resMax || 24);
-      if (st.subtypeDetail === 0x11) p *= 1.5;
-      setV("v-power", p.toFixed(1));
-      integrate(p, speed);
-    }
-  } else if (S.protocol === "v0x02") {
-    if (st.speed !== undefined) setV("v-speed", st.speed);
-    if (st.power !== undefined) setV("v-power", st.power);
-    if (st.distanceM !== undefined) setV("v-dist", (st.distanceM / 1000).toFixed(2));
-    if (st.kcal !== undefined) setV("v-kcal", st.kcal.toFixed(1));
-    if (st.durationS !== undefined) setV("v-time", st.durationS);
-  }
+
+  var distM = useDevice() ? st.devDistM : st.simDistM;
+  if (distM !== undefined) setV("v-dist", (distM / 1000).toFixed(2));
+  var kcal = useDevice() ? st.devKcal : st.simKcal;
+  if (kcal !== undefined) setV("v-kcal", kcal.toFixed(1));
+  var durS = useDevice() ? st.devDurS : st.simDurS;
+  if (durS !== undefined) setV("v-time", fmtTime(durS));
+
+  if (S.protocol === "v0x02") setV("v-src", useDevice() ? "设备 8813" : "本地推算 (rpm×阻力)");
+  else if (S.protocol) setV("v-src", "本地推算 (rpm×阻力)");
 }
-function integrate(power, speedKmh) {
-  var st = S.st, now = Date.now(), last = st._t;
-  st._t = now;
-  if (!last) return;
+
+function startIntegrator() {
+  if (S.integTimer) return;
+  S.st._lastT = null;
+  S.integTimer = setInterval(integStep, 500);
+}
+function stopIntegrator() {
+  if (S.integTimer) { clearInterval(S.integTimer); S.integTimer = null; }
+}
+function integStep() {
+  if (!S.connected) return;
+  var st = S.st, now = Date.now();
+  var last = st._lastT;
+  st._lastT = now;
+  if (last == null) return;
   var dt = (now - last) / 1000;
-  if (dt > 10) dt = 0;
-  st.dist = (st.dist || 0) + (speedKmh / 3.6) * dt;
-  st.kcalI = (st.kcalI || 0) + power * dt / 4184.0;
-  st.elapsed = (st.elapsed || 0) + dt;
-  setV("v-dist", (st.dist / 1000).toFixed(2));
-  setV("v-kcal", st.kcalI.toFixed(1));
-  setV("v-time", Math.round(st.elapsed));
+  if (dt <= 0) return;
+  if (dt > 3) dt = 0;                        /* 页面被系统挂起 → 不补计 */
+  if (!(st.rpm >= 1)) { render(); return; }  /* 未踩动: 时长/距离不增长 */
+  if (useDevice()) { render(); return; }     /* 设备自带累计 */
+  var speed = simSpeed(), power = simPower();
+  st.simDistM = (st.simDistM || 0) + (speed / 3.6) * dt;
+  st.simKcal  = (st.simKcal  || 0) + (power / 1000.0) * dt;
+  st.simDurS  = (st.simDurS  || 0) + dt;
+  render();
+}
+function resetTotals() {
+  var st = S.st;
+  st.simDistM = undefined; st.simKcal = undefined; st.simDurS = undefined;
+  st.src8813 = false;
+  st.devDistM = undefined; st.devKcal = undefined; st.devDurS = undefined;
+  st.devSpeed = undefined; st.devPower = undefined; st.devCadence = undefined;
+  setV("v-dist", "0.00"); setV("v-kcal", "0.0"); setV("v-time", "0:00");
+  log("累计已重置");
+  render();
+}
+
+/* ---------- 诊断摘要 ---------- */
+function diagText() {
+  var L = [];
+  L.push("莫比椭圆机控制台 v1.3 诊断摘要  " + new Date().toLocaleString());
+  L.push("设备=" + ((S.device && S.device.name) || "(未知)") + "  协议=" + (S.protocol || "-") + "  连接=" + S.connected);
+  L.push("8801 interval=" + S.interval + "  8805 磁钢数=" + S.magnets + "  8806 阻力上限=" + S.resMax + "  标准订阅=" + S.subCount);
+  L.push("服务列表=" + S.svcList.map(function (s) { return s4(s.uuid); }).join(","));
+  var keys = Object.keys(S.stats);
+  if (!keys.length) L.push("(未收到任何通知帧)");
+  keys.forEach(function (t) { L.push("  帧 " + t + " ×" + S.stats[t].n + "  最后一帧=" + S.stats[t].last); });
+  L.push("数据源=" + (useDevice() ? "设备 8813 全量帧" : "本地推算") +
+         "  rpm=" + (S.st.rpm === undefined ? "-" : S.st.rpm.toFixed(1)) +
+         "  阻力=" + (S.st.resistance === undefined ? "-" : S.st.resistance) +
+         "  心率=" + (S.st.hr === undefined ? "-" : S.st.hr));
+  return L.join("\n");
 }
 
 /* ---------- 阻力控制 ---------- */
@@ -617,7 +768,7 @@ async function sendResistance(v) {
     } else if (S.protocol === "环通") {
       S.htResistance = v; log("环通阻力→" + v + " (下个周期帧生效)");
     } else { log("当前协议不支持阻力控制"); return; }
-    S.st.resistance = v; setV("v-res", v);
+    S.st.resistance = v; setV("v-res", v); render();
   } catch (e) { log("阻力下发失败: " + (e.message || e)); }
 }
 function syncSlider(v) { $("resSlider").value = v; $("resVal").textContent = v; }
@@ -629,7 +780,12 @@ function onSlider() {
 $("resSlider").addEventListener("change", onSlider);
 $("resMinus").addEventListener("click", function () { var s = $("resSlider"); s.value = Math.max(1, +s.value - 1); onSlider(); });
 $("resPlus").addEventListener("click", function () { var s = $("resSlider"); s.value = Math.min(+s.max, +s.value + 1); onSlider(); });
-$("chkHalve").addEventListener("change", function () { S.st.halveRpm = $("chkHalve").checked; });
+$("chkHalve").addEventListener("change", function () {
+  var on = $("chkHalve").checked;
+  S.st.halveRpm = on;                       /* v1: 椭圆机 rpm 再 ÷2 */
+  S.magnets = on ? 2 : 1;                   /* v2: 等效于磁钢数按 2 计算 */
+  log("踏频修正 ÷2: " + (on ? "开" : "关"));
+});
 
 /* ---------- 启停 (v0x02 实验) ---------- */
 Array.prototype.forEach.call(document.querySelectorAll("[data-st]"), function (b) {
@@ -639,7 +795,7 @@ Array.prototype.forEach.call(document.querySelectorAll("[data-st]"), function (b
     try {
       if (!S.st.unlocked) { await cWrite("8800", "88ff", UNLOCK_FRAME); S.st.unlocked = true; }
       await cWrite("8800", "880f", buildV02StateFrame(st));
-    } catch (e) { log("状态帧失败: " + e.message); }
+    } catch (e) { log("状态帧失败: " + (e.message || e)); }
   });
 });
 
@@ -648,6 +804,17 @@ $("btnDump").addEventListener("click", async function () {
   if (!S.connected) { log("未连接"); return; }
   await dumpGatt();
 });
+$("btnDiag").addEventListener("click", function () {
+  var t = diagText();
+  log("==== 诊断摘要 ====\n" + t + "\n=================");
+  try {
+    var ta = document.createElement("textarea");
+    ta.value = t; document.body.appendChild(ta); ta.select();
+    document.execCommand("copy"); document.body.removeChild(ta);
+    log("(诊断摘要已复制到剪贴板)");
+  } catch (e) { log("(复制失败, 请手动从上方日志复制)"); }
+});
+$("btnReset").addEventListener("click", resetTotals);
 $("btnCopy").addEventListener("click", function () {
   try {
     var ta = document.createElement("textarea");
@@ -657,7 +824,7 @@ $("btnCopy").addEventListener("click", function () {
     document.execCommand("copy");
     document.body.removeChild(ta);
     log("日志已复制到剪贴板");
-  } catch (e) { log("复制失败: " + e.message); }
+  } catch (e) { log("复制失败: " + (e.message || e)); }
 });
 $("btnClear").addEventListener("click", function () { logBox.textContent = ""; });
 
@@ -666,7 +833,7 @@ $("btnConn").addEventListener("click", function () {
   if (S.connected) { disconnect(); } else { connect(); }
 });
 
-log("就绪 v1.2 (iOS 短格式 UUID 兼容 + GATT 诊断 + 写特征优先级)");
+log("就绪 v1.3 (v0x02 速度/功率/距离/热量/时长本地推算兜底 + 诊断摘要)");
 log("① 给椭圆机开机并踩动几下 ② 点上方按钮选择设备");
 if (location.search.indexOf("selftest") >= 0) { log("== 协议自检 =="); runSelfTests(log); }
 })();
