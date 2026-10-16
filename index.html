@@ -41,7 +41,7 @@
 </head>
 <body>
 <div class="hdr-row">
-  <h1>莫比椭圆机控制台 <span style="font-size:11px;color:#8b949e">v1.1</span></h1><span id="connState">未连接</span>
+  <h1>莫比椭圆机控制台 <span style="font-size:11px;color:#8b949e">v1.2</span></h1><span id="connState">未连接</span>
 </div>
 <div class="sub">Web 版 · 三协议自适应 (v1/v2/环通) · 需 Bluefy 浏览器打开</div>
 
@@ -477,6 +477,28 @@ function onV02Data(u8, tag) {
 function onHr(u8) { var hr = parseHr(u8); if (hr) { S.st.hr = hr; setV("v-hr", hr); } }
 
 /* ---------- v0x01 ---------- */
+/* 阻力写特征选择: ffe3 > ffe2 > ffed > 运动服务(ffe0/ffc0/fff0)下的可写 > 任意可写 */
+async function pickV01WriteChar() {
+  var CAND = ["ffe3", "ffe2", "ffed"];
+  for (var k = 0; k < CAND.length; k++) {
+    var c = await findCharAnywhere(CAND[k]);
+    if (c) return c;
+  }
+  var order = ["ffe0", "ffc0", "fff0"];
+  var svcs = S.svcList.slice().sort(function (a, b) {
+    var pa = order.indexOf(s4(a.uuid)), pb = order.indexOf(s4(b.uuid));
+    return (pa < 0 ? 99 : pa) - (pb < 0 ? 99 : pb);
+  });
+  for (var i = 0; i < svcs.length; i++) {
+    var cs = [];
+    try { cs = await svcs[i].getCharacteristics(); } catch (e) { continue; }
+    for (var j = 0; j < cs.length; j++) {
+      var p = cs[j].properties || {};
+      if (p.write || p.writeWithoutResponse) return cs[j];
+    }
+  }
+  return null;
+}
 async function setupV01() {
   var TARGET = ["ffe1", "ffea", "fff4", "ffeb", "ffe4"];
   var name = (S.device.name || "").toUpperCase();
@@ -504,24 +526,10 @@ async function setupV01() {
       }
     }
   }
-  var wc = await findCharAnywhere("ffe3");
-  if (wc) log("阻力写特征: ffe3");
-  else {
-    for (var x = 0; x < S.svcList.length; x++) {
-      var cc = [];
-      try { cc = await S.svcList[x].getCharacteristics(); } catch (e) { continue; }
-      for (var y = 0; y < cc.length; y++) {
-        var pp = cc[y].properties || {};
-        if (pp.write || pp.writeWithoutResponse) {
-          wc = cc[y];
-          log("未找到 ffe3, 改用可写特征 " + s4(S.svcList[x].uuid) + ":" + s4(cc[y].uuid) + " 作为阻力通道");
-          break;
-        }
-      }
-      if (wc) break;
-    }
-  }
-  S.writeCharV01 = wc;
+  S.writeCharV01 = await pickV01WriteChar();
+  log(S.writeCharV01
+    ? ("阻力写特征: " + S.writeCharV01.uuid + " [" + ((S.writeCharV01.properties.write ? "W" : "") + (S.writeCharV01.properties.writeWithoutResponse ? "Wnr" : "")) + "]")
+    : "警告: 未找到任何可写特征, 无法调节阻力");
   log(n ? ("v0x01 装配完成, 已订阅: " + found.join(", ")) : "警告: 没有任何可订阅特征");
 }
 function onV01Data(u8, tag) {
@@ -658,7 +666,7 @@ $("btnConn").addEventListener("click", function () {
   if (S.connected) { disconnect(); } else { connect(); }
 });
 
-log("就绪 v1.1 (已修复 iOS 短格式 UUID 兼容)");
+log("就绪 v1.2 (iOS 短格式 UUID 兼容 + GATT 诊断 + 写特征优先级)");
 log("① 给椭圆机开机并踩动几下 ② 点上方按钮选择设备");
 if (location.search.indexOf("selftest") >= 0) { log("== 协议自检 =="); runSelfTests(log); }
 })();
