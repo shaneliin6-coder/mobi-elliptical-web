@@ -42,7 +42,7 @@
 </head>
 <body>
 <div class="hdr-row">
-  <h1>莫比椭圆机控制台 <span style="font-size:11px;color:#8b949e">v1.4</span></h1><span id="connState">未连接</span>
+  <h1>莫比椭圆机控制台 <span style="font-size:11px;color:#8b949e">v1.5</span></h1><span id="connState">未连接</span>
 </div>
 <div class="sub">Web 版 · 三协议自适应 (v1/v2/环通) · 需 Bluefy 浏览器打开</div>
 
@@ -72,6 +72,9 @@
     <div id="resVal">1</div>
     <button class="res-btn" id="resPlus">＋</button>
   </div>
+  <div class="note" style="margin-top:2px">阻力上限 <b id="resMaxLbl">24</b>
+    <button id="resProbe" style="padding:4px 8px;font-size:12px;margin-left:8px">探测上限</button>
+    　体重 <input id="weightIn" type="number" min="30" max="200" value="65" style="width:58px"> kg</div>
   <label class="chk"><input type="checkbox" id="chkHalve"> 踏频修正 ÷2（速度/踏频偏高时勾选）</label>
 </div>
 
@@ -306,7 +309,7 @@ var S = {
   device: null, server: null, protocol: "",
   st: { halveRpm: false },
   svcList: [], svcMap: {},
-  magnets: 1, resMax: 24, interval: null,
+  magnets: 1, resMax: 24, interval: null, weightKg: 65, probing: false,
   htTimer: null, htResistance: 1, connected: false,
   writeCharV01: null, integTimer: null, subCount: 0,
   stats: {},       /* tag -> {n, last} */
@@ -513,7 +516,13 @@ async function setupV02() {
   d = await cRead("8800", "8805"); if (d && d.length && d[0]) { S.magnets = d[0]; log("磁钢数=" + d[0]); }
   d = await cRead("8800", "8802"); if (d && d.length) log("8802 机型码=" + hexs(d));
   d = await cRead("8800", "8806");
-  if (d && d.length > 2 && d[2] > 0) { S.resMax = d[2]; $("resSlider").max = d[2]; log("阻力上限=" + d[2]); }
+  if (d && d.length > 2 && d[2] > 0) {
+    S.resMax = d[2]; $("resSlider").max = d[2]; $("resMaxLbl").textContent = d[2];
+    log("8806=" + hexs(d) + " → 阻力上限=" + d[2] + " (滑块 1.." + d[2] + ")");
+  } else {
+    log("⚠ 8806 返回异常(" + (d ? hexs(d) : "空") + ") → 阻力上限未知, 暂用 24; "
+        + "阻力体感/功率/热量都会偏, 请点【探测上限】");
+  }
   d = await cRead("180f", "2a19"); if (d && d.length) setV("v-batt", d[0]);
   var uc = await findChar("8800", "88ff");
   if (uc) { if (await cWriteChar(uc, UNLOCK_FRAME, "88ff")) S.st.unlocked = true; }
@@ -566,7 +575,12 @@ function onV02Data(u8, tag) {
     render();
   } else if (tag === "8812") {
     logThr("8812", 3000, "N 8812 <- " + hexs(u8));
-    if (u8.length && u8[0] >= 1 && u8[0] <= S.resMax) { st.resistance = u8[0]; setV("v-res", u8[0]); syncSlider(u8[0]); }
+    if (u8.length) {
+      if (S.probing) S.probeResult = u8[0];
+      if (S.lastResCmd !== undefined && Date.now() - S.lastResT < 5000 && u8[0] !== S.lastResCmd)
+        log("⚠ 阻力校验不一致: 下发 " + S.lastResCmd + " → 设备回报 " + u8[0]);
+      if (u8[0] >= 1) { st.resistance = u8[0]; setV("v-res", u8[0]); syncSlider(u8[0]); }
+    }
   } else if (tag === "8813") {
     log("N 8813 <- " + hexs(u8) + " (len=" + u8.length + ")");
     if (parseV02_8813(u8, st)) log("  → 全量帧已解析: 速度/时长/距离/热量/功率 改用设备值");
@@ -730,7 +744,8 @@ function integStep() {
   if (useDevice()) { render(); return; }     /* 设备自带累计 */
   var speed = simSpeed(), power = simPower();
   st.simDistM = (st.simDistM || 0) + (speed / 3.6) * dt;
-  st.simKcal  = (st.simKcal  || 0) + (power / 1000.0) * dt;
+  /* App 原式: calculateCalories = power/1000 + weight/3600 (每秒) */
+  st.simKcal  = (st.simKcal  || 0) + (power / 1000.0 + (S.weightKg || 65) / 3600.0) * dt;
   st.simDurS  = (st.simDurS  || 0) + dt;
   render();
 }
@@ -769,6 +784,7 @@ function diagText() {
 async function sendResistance(v) {
   if (!S.connected) { log("未连接, 无法下发阻力"); return; }
   v = Math.max(1, Math.min(Math.round(v), S.resMax || 24));
+  S.lastResCmd = v; S.lastResT = Date.now();
   try {
     if (S.protocol === "v0x02") {
       if (!S.st.unlocked) { await cWrite("8800", "88ff", UNLOCK_FRAME); S.st.unlocked = true; }
@@ -783,6 +799,26 @@ async function sendResistance(v) {
     S.st.resistance = v; setV("v-res", v); render();
   } catch (e) { log("阻力下发失败: " + (e.message || e)); }
 }
+async function probeResMax() {
+  if (!S.connected || S.protocol !== "v0x02") { log("探测上限仅支持 v0x02"); return; }
+  S.probing = true; S.probeResult = null;
+  log("探测阻力上限: 下发 32, 等待设备 8812 回报 ...");
+  try {
+    if (!S.st.unlocked) { await cWrite("8800", "88ff", UNLOCK_FRAME); S.st.unlocked = true; }
+    await cWrite("8800", "880f", buildV02ResFrame(32));
+  } catch (e) { S.probing = false; log("探测下发失败: " + (e.message || e)); return; }
+  await sleep(3000);
+  S.probing = false;
+  if (S.probeResult) {
+    S.resMax = S.probeResult;
+    $("resSlider").max = S.resMax;
+    $("resMaxLbl").textContent = S.resMax;
+    log("✓ 设备回报最大档位=" + S.probeResult + " → 阻力上限修正为 " + S.resMax + " (滑块 1.." + S.resMax + ")");
+    await sendResistance(1);
+  } else {
+    log("未收到 8812 回报, 无法判定上限");
+  }
+}
 function syncSlider(v) { $("resSlider").value = v; $("resVal").textContent = v; }
 function onSlider() {
   var v = parseInt($("resSlider").value, 10);
@@ -790,6 +826,11 @@ function onSlider() {
   sendResistance(v);
 }
 $("resSlider").addEventListener("change", onSlider);
+$("resProbe").addEventListener("click", probeResMax);
+$("weightIn").addEventListener("change", function () {
+  var v = parseFloat(this.value);
+  if (v >= 30 && v <= 200) { S.weightKg = v; log("体重=" + v + " kg (影响热量)"); }
+});
 $("resMinus").addEventListener("click", function () { var s = $("resSlider"); s.value = Math.max(1, +s.value - 1); onSlider(); });
 $("resPlus").addEventListener("click", function () { var s = $("resSlider"); s.value = Math.min(+s.max, +s.value + 1); onSlider(); });
 $("chkHalve").addEventListener("change", function () {
@@ -845,7 +886,7 @@ $("btnConn").addEventListener("click", function () {
   if (S.connected) { disconnect(); } else { connect(); }
 });
 
-log("就绪 v1.4 (v0x02 速度/功率/距离/热量/时长本地推算兜底 + 心率 180d 探测 + 诊断摘要)");
+log("就绪 v1.5 (v0x02 速度/功率/距离/热量/时长本地推算兜底 + 心率 180d 探测 + 诊断摘要)");
 log("① 给椭圆机开机并踩动几下 ② 点上方按钮选择设备");
 if (location.search.indexOf("selftest") >= 0) { log("== 协议自检 =="); runSelfTests(log); }
 })();
