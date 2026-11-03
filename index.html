@@ -42,7 +42,7 @@
 </head>
 <body>
 <div class="hdr-row">
-  <h1>莫比椭圆机控制台 <span style="font-size:11px;color:#8b949e">v1.5</span></h1><span id="connState">未连接</span>
+  <h1>莫比椭圆机控制台 <span style="font-size:11px;color:#8b949e">v1.6</span></h1><span id="connState">未连接</span>
 </div>
 <div class="sub">Web 版 · 三协议自适应 (v1/v2/环通) · 需 Bluefy 浏览器打开</div>
 
@@ -364,6 +364,7 @@ async function connect() {
     S.server = await device.gatt.connect();
     S.connected = true;
     setConnState("已连接");
+    keepAwake();
     log("GATT 已连接, 扫描服务…");
 
     S.svcList = await S.server.getPrimaryServices();
@@ -747,6 +748,8 @@ function integStep() {
   /* App 原式: calculateCalories = power/1000 + weight/3600 (每秒) */
   st.simKcal  = (st.simKcal  || 0) + (power / 1000.0 + (S.weightKg || 65) / 3600.0) * dt;
   st.simDurS  = (st.simDurS  || 0) + dt;
+  S._saveN = (S._saveN || 0) + 1;
+  if (S._saveN % 20 === 0) saveTotals();   /* 每 10 秒落盘一次 */
   render();
 }
 function resetTotals() {
@@ -755,6 +758,7 @@ function resetTotals() {
   st.src8813 = false;
   st.devDistM = undefined; st.devKcal = undefined; st.devDurS = undefined;
   st.devSpeed = undefined; st.devPower = undefined; st.devCadence = undefined;
+  try { localStorage.removeItem("mobi_totals"); } catch (e) {}
   setV("v-dist", "0.00"); setV("v-kcal", "0.0"); setV("v-time", "0:00");
   log("累计已重置");
   render();
@@ -886,8 +890,56 @@ $("btnConn").addEventListener("click", function () {
   if (S.connected) { disconnect(); } else { connect(); }
 });
 
-log("就绪 v1.5 (v0x02 速度/功率/距离/热量/时长本地推算兜底 + 心率 180d 探测 + 诊断摘要)");
+log("就绪 v1.6 (v0x02 速度/功率/距离/热量/时长本地推算兜底 + 心率 180d 探测 + 诊断摘要)");
 log("① 给椭圆机开机并踩动几下 ② 点上方按钮选择设备");
+/* ---------- 屏幕常亮 / 前后台 ---------- */
+var wakeLock = null;
+async function keepAwake() {
+  try {
+    if (!("wakeLock" in navigator)) {
+      log("⚠ 本浏览器不支持屏幕常亮(Wake Lock); 请到 设置→显示与亮度→自动锁定 选「永不」");
+      return;
+    }
+    if (wakeLock && !wakeLock.released) return;
+    wakeLock = await navigator.wakeLock.request("screen");
+    wakeLock.addEventListener("release", function () { wakeLock = null; log("屏幕常亮已释放"); });
+    log("✓ 屏幕常亮已开启 (Wake Lock), 踩车时不会自动熄屏");
+  } catch (e) {
+    log("⚠ 屏幕常亮申请失败(" + (e.message || e) + "); 请手动设 自动锁定→永不");
+  }
+}
+function saveTotals() {
+  try {
+    localStorage.setItem("mobi_totals", JSON.stringify({
+      d: S.st.simDistM || 0, k: S.st.simKcal || 0, t: S.st.simDurS || 0, ts: Date.now()
+    }));
+  } catch (e) {}
+}
+function loadTotals() {
+  try {
+    var o = JSON.parse(localStorage.getItem("mobi_totals") || "null");
+    if (!o || !o.ts || Date.now() - o.ts > 600000) return;   /* 超过 10 分钟不恢复 */
+    S.st.simDistM = o.d || 0; S.st.simKcal = o.k || 0; S.st.simDurS = o.t || 0;
+    log("已恢复被系统回收前的累计: " + fmtTime(o.t || 0));
+    render();
+  } catch (e) {}
+}
+document.addEventListener("visibilitychange", function () {
+  if (document.visibilityState === "hidden") {
+    saveTotals();
+    log("页面进入后台: iOS 会挂起 JS, 期间数据暂停累计(蓝牙若断开需回前台重连)");
+  } else {
+    log("回到前台: 检查连接与常亮");
+    keepAwake();
+    if (S.connected && S.device && (!S.server || !S.server.connected)) {
+      log("检测到蓝牙连接已断, 请点「连接」重新连接(设备需重新选择)");
+      setConnState("已断开");
+      S.connected = false;
+    }
+  }
+});
+loadTotals();
+
 if (location.search.indexOf("selftest") >= 0) { log("== 协议自检 =="); runSelfTests(log); }
 })();
 </script>
